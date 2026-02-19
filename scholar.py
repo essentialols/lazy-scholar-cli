@@ -250,10 +250,19 @@ def fetch_openalex(doi: str) -> dict | None:
 def fetch_semantic_scholar(doi: str) -> dict | None:
     """Fetch paper data from Semantic Scholar."""
     fields = "paperId,title,citationCount,influentialCitationCount,isOpenAccess,openAccessPdf,tldr,publicationTypes,publicationDate,journal,authors"
-    return _get(
+    data = _get(
         f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote(doi, safe='')}",
         params={"fields": fields},
     )
+    # If DOI lookup failed and this is an arXiv DOI, try ArXiv:ID format
+    if not data:
+        m = re.match(r"10\.48550/arXiv\.(.+)", doi, re.IGNORECASE)
+        if m:
+            data = _get(
+                f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{m.group(1)}",
+                params={"fields": fields},
+            )
+    return data
 
 
 def fetch_recommendations(paper_id: str, limit: int = 5) -> list:
@@ -792,12 +801,14 @@ def slugify(text: str) -> str:
 
 def resolve_arxiv_doi(doi: str) -> str:
     """If doi is an arXiv DOI (10.48550/arXiv.*), query Semantic Scholar to
-    find the canonical published DOI.  Returns the published DOI if found,
-    otherwise the original."""
+    find the canonical published DOI.  Falls back to CrossRef title search
+    if S2 doesn't have the published DOI linked.  Returns the published DOI
+    if found, otherwise the original."""
     m = re.match(r"10\.48550/arXiv\.(.+)", doi, re.IGNORECASE)
     if not m:
         return doi
     arxiv_id = m.group(1)
+    title = None
     try:
         resp = requests.get(
             f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{arxiv_id}",
@@ -812,8 +823,28 @@ def resolve_arxiv_doi(doi: str) -> str:
             if published_doi and published_doi.lower() != doi.lower():
                 print(f"  Resolved arXiv DOI → {published_doi}")
                 return published_doi
+            title = data.get("title")
     except Exception:
         pass
+    # Fallback: search CrossRef by title if S2 didn't have a published DOI
+    if title:
+        try:
+            cr_resp = requests.get(
+                "https://api.crossref.org/works",
+                params={"query.title": title, "rows": 3},
+                headers={"User-Agent": USER_AGENT},
+                timeout=10,
+            )
+            if cr_resp.ok:
+                items = cr_resp.json().get("message", {}).get("items", [])
+                for item in items:
+                    cr_doi = item.get("DOI", "")
+                    cr_title = (item.get("title") or [""])[0].lower()
+                    if cr_doi and cr_doi.lower() != doi.lower() and title.lower() in cr_title:
+                        print(f"  Resolved arXiv DOI → {cr_doi} (via CrossRef title match)")
+                        return cr_doi
+        except Exception:
+            pass
     return doi
 
 
