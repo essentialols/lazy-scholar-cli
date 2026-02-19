@@ -790,22 +790,52 @@ def slugify(text: str) -> str:
     return slug[:80] if slug else "report"
 
 
+def resolve_arxiv_doi(doi: str) -> str:
+    """If doi is an arXiv DOI (10.48550/arXiv.*), query Semantic Scholar to
+    find the canonical published DOI.  Returns the published DOI if found,
+    otherwise the original."""
+    m = re.match(r"10\.48550/arXiv\.(.+)", doi, re.IGNORECASE)
+    if not m:
+        return doi
+    arxiv_id = m.group(1)
+    try:
+        resp = requests.get(
+            f"https://api.semanticscholar.org/graph/v1/paper/ArXiv:{arxiv_id}",
+            params={"fields": "externalIds,title"},
+            headers={"User-Agent": USER_AGENT},
+            timeout=10,
+        )
+        if resp.ok:
+            data = resp.json()
+            ext = data.get("externalIds") or {}
+            published_doi = ext.get("DOI", "")
+            if published_doi and published_doi.lower() != doi.lower():
+                print(f"  Resolved arXiv DOI → {published_doi}")
+                return published_doi
+    except Exception:
+        pass
+    return doi
+
+
 def resolve_input(input_str: str) -> str | None:
     """Resolve input to a DOI."""
     if input_str.startswith("10."):
-        return input_str
+        return resolve_arxiv_doi(input_str)
     if input_str.startswith(("http://", "https://")):
-        return extract_doi_from_url(input_str)
+        doi = extract_doi_from_url(input_str)
+        return resolve_arxiv_doi(doi) if doi else None
     path = Path(input_str).expanduser()
     if path.exists() and path.suffix.lower() == ".pdf":
         print(f"Extracting DOI from PDF: {path.name}")
         doi = extract_doi_from_pdf(str(path))
         if doi:
             print(f"  Found DOI: {doi}")
+            return resolve_arxiv_doi(doi)
         else:
             print(f"  No DOI found in PDF.", file=sys.stderr)
         return doi
-    return extract_doi(input_str)
+    doi = extract_doi(input_str)
+    return resolve_arxiv_doi(doi) if doi else None
 
 
 # ---------------------------------------------------------------------------
