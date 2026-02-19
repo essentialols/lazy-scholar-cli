@@ -107,6 +107,35 @@ def _polite_delay():
     time.sleep(random.uniform(API_CALL_DELAY_MIN, API_CALL_DELAY_MAX))
 
 
+# ---------------------------------------------------------------------------
+# Proxy rotation
+# ---------------------------------------------------------------------------
+
+_PROXY_FORCE: bool | None = None  # None = use config, True = force on, False = force off
+
+
+def _load_proxy_config() -> dict:
+    """Load proxy configuration from ~/.scholar-proxies.json."""
+    config_path = Path.home() / ".scholar-proxies.json"
+    try:
+        return json.loads(config_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"enabled": False, "proxies": []}
+
+
+def _get_proxy() -> dict | None:
+    """Get a random proxy for the requests library, or None if disabled."""
+    config = _load_proxy_config()
+    enabled = _PROXY_FORCE if _PROXY_FORCE is not None else config.get("enabled", False)
+    if not enabled:
+        return None
+    proxies = config.get("proxies", [])
+    if not proxies:
+        return None
+    url = random.choice(proxies)
+    return {"http": url, "https": url}
+
+
 def _get(url, params=None, headers=None, timeout=30, retries=2):
     """GET with default headers and 429 retry."""
     h = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -114,7 +143,7 @@ def _get(url, params=None, headers=None, timeout=30, retries=2):
         h.update(headers)
     for attempt in range(retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=h, timeout=timeout)
+            resp = requests.get(url, params=params, headers=h, timeout=timeout, proxies=_get_proxy())
             if resp.ok:
                 return resp.json()
             if resp.status_code == 429 and attempt < retries:
@@ -136,7 +165,7 @@ def _post(url, json_data=None, params=None, headers=None, timeout=30, retries=2)
         h.update(headers)
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(url, json=json_data, params=params, headers=h, timeout=timeout)
+            resp = requests.post(url, json=json_data, params=params, headers=h, timeout=timeout, proxies=_get_proxy())
             if resp.ok:
                 return resp.json()
             if resp.status_code == 429 and attempt < retries:
@@ -815,6 +844,7 @@ def resolve_arxiv_doi(doi: str) -> str:
             params={"fields": "externalIds,title"},
             headers={"User-Agent": USER_AGENT},
             timeout=10,
+            proxies=_get_proxy(),
         )
         if resp.ok:
             data = resp.json()
@@ -834,6 +864,7 @@ def resolve_arxiv_doi(doi: str) -> str:
                 params={"query.title": title, "rows": 3},
                 headers={"User-Agent": USER_AGENT},
                 timeout=10,
+                proxies=_get_proxy(),
             )
             if cr_resp.ok:
                 items = cr_resp.json().get("message", {}).get("items", [])
@@ -899,7 +930,15 @@ def main():
         action="store_true",
         help="Output raw JSON instead of Markdown",
     )
+    proxy_group = parser.add_mutually_exclusive_group()
+    proxy_group.add_argument("--proxy", dest="use_proxy", action="store_true", default=None,
+                             help="Force proxy usage (overrides ~/.scholar-proxies.json)")
+    proxy_group.add_argument("--no-proxy", dest="use_proxy", action="store_false",
+                             help="Disable proxy (overrides ~/.scholar-proxies.json)")
     args = parser.parse_args()
+
+    global _PROXY_FORCE
+    _PROXY_FORCE = args.use_proxy
 
     # Resolve DOIs
     dois = []
